@@ -15,9 +15,25 @@
 #define MULTIPLIER 48271
 #define DEFAULT    123456789
 
+typedef struct {
+    double x, y, z;
+    double mass;
+} Particle;
+
+typedef struct {
+    double xold, yold, zold;
+    double fx, fy, fz;
+} ParticleV;
+
+Particle  * particles;   /* Particles */
+ParticleV * pv;          /* Particle velocity */
+
+MPI_Datatype partc;
+MPI_Datatype partcV;
+
 static long seed = DEFAULT;
-double dt, dt_old; /* Alterado de static para global */
-int npart, num_process, process_rank, part_portion;
+double dt, dt_old, max_f; /* Alterado de static para global */
+int npart, num_process, process_rank, part_portion, final_range;
 
 double Random(void)
 /* ----------------------------------------------------------------
@@ -42,35 +58,27 @@ double Random(void)
  * End of the pRNG algorithm
  */
 
-typedef struct {
-    double x, y, z;
-    double mass;
-} Particle;
-
-typedef struct {
-    double xold, yold, zold;
-    double fx, fy, fz;
-} ParticleV;
-
-Particle  * particles;   /* Particles */
-ParticleV * pv;          /* Particle velocity */
-
-void ComputeForces_MPI( ParticleV [] );
-void InitParticles( Particle[], ParticleV [], int );
-double ComputeForces( Particle [], Particle [], ParticleV [], int );
-double ComputeNewPos( Particle [], ParticleV [], int, double);
+void	ComputeForces_MPI();
+void	InitParticles();
+double	ComputeForces();
+double	ComputeNewPos();
 
 int main(int argc, char **argv)
 {
 	MPI_Init(&argc, &argv);
 
+	MPI_Type_contiguous(4, MPI_DOUBLE, &partc);
+	MPI_Type_contiguous(5, MPI_DOUBLE, &partcV);
+	MPI_Type_commit(&partc);
+	MPI_Type_commit(&partcV);
+
 	MPI_Comm_size(MPI_COMM_WORLD, &num_process);
 	MPI_Comm_rank(MPI_COMM_WORLD, &process_rank);
 
-    int         i, j;
+    int         i;
     int         cnt;         /* number of times in loop */
     double      sim_t;       /* Simulation time */
-    int tmp;
+
     if(argc != 3){
 		printf("Wrong number of parameters.\nUsage: nbody num_bodies timesteps\n");
 		exit(1);
@@ -83,6 +91,7 @@ int main(int argc, char **argv)
 	dt_old = 0.001;
 
 	part_portion = npart / (num_process - 1);
+	final_range = part_portion + (npart % (num_process - 1));
 
     /* Allocate memory for particles */
     particles = (Particle *) malloc(sizeof(Particle)*npart);
@@ -96,10 +105,9 @@ int main(int argc, char **argv)
     sim_t = 0.0;
 
     while (cnt--) {
-		double max_f;
+		max_f = 0.0;
 		/* Compute forces (2D only) */
-		ComputeForces_MPI(pv);
-		//max_f = ComputeForces( particles, particles, pv, npart );
+		ComputeForces_MPI(particles, pv);
 		/* Once we have the forces, we compute the changes in position */
 		if (process_rank == 0) {
 		  sim_t += ComputeNewPos( particles, pv, npart, max_f);
@@ -112,6 +120,9 @@ int main(int argc, char **argv)
 		}
     }
 
+    MPI_Type_free(&partc);
+    MPI_Type_free(&partcV);
+
     free(particles);
     free(pv);
 
@@ -120,29 +131,32 @@ int main(int argc, char **argv)
     return 0;
 }
 
-void ComputeForces_MPI(ParticleV pv[]) {
-	MPI_Bcast(&particles, npart, MPI_CHAR, 0, MPI_COMM_WORLD);
-	int final_range = npart - (part_portion * (num_process - 2));
+void ComputeForces_MPI() {
+	MPI_Bcast(&particles[0], npart, partc, 0, MPI_COMM_WORLD);
+	double max_force;
 	if (process_rank == 0) {
 		int i;
-		for (i = 1; i != num_process; ++i) {
+		for (i = 1; i != num_process - 1; ++i) {
 			if (process_rank == num_process - 1) {
-				MPI_Recv(&pv[(i-1)*part_portion], final_range, MPI_CHAR, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+				MPI_Recv(&pv[(i-1)*part_portion], final_range, partcV, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			} else {
-				MPI_Recv(&pv[(i-1)*part_portion], part_portion, MPI_CHAR, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+				MPI_Recv(&pv[(i-1)*part_portion], part_portion, partcV, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			}
+			MPI_Recv(&max_force, 1, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			if (max_f < max_force) max_f = max_force;
 		}
 	} else {
-		ComputeForces(particles, particles, pv, npart);
+		max_f = ComputeForces(particles, particles, pv, npart);
 		if (process_rank == num_process - 1) {
-			MPI_Send(&pv[(process_rank-1)*part_portion], final_range, MPI_CHAR, 0, 0, MPI_COMM_WORLD);
+			MPI_Send(&pv[(process_rank-1)*part_portion], final_range, partcV, 0, 0, MPI_COMM_WORLD);
 		} else {
-			MPI_Send(&pv[(process_rank-1)*part_portion], part_portion, MPI_CHAR, 0, 0, MPI_COMM_WORLD);
+			MPI_Send(&pv[(process_rank-1)*part_portion], part_portion, partcV, 0, 0, MPI_COMM_WORLD);
 		}
+		MPI_Send(&max_force, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
 	}
 }
 
-void InitParticles( Particle particles[], ParticleV pv[], int npart )
+void InitParticles()
 {
     int i;
     for (i=0; i<npart; i++) {
@@ -159,7 +173,7 @@ void InitParticles( Particle particles[], ParticleV pv[], int npart )
     }
 }
 
-double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[], int npart )
+double ComputeForces()
 {
 	unsigned begin_range = (process_rank - 1) * part_portion;
 	unsigned end_range = begin_range + part_portion;
@@ -175,14 +189,14 @@ double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[],
 		int j;
 		double xi, yi, mi, rx, ry, mj, r, fx, fy, rmin;
 		rmin = 100.0;
-		xi   = myparticles[i].x;
-		yi   = myparticles[i].y;
+		xi   = particles[i].x;
+		yi   = particles[i].y;
 		fx   = 0.0;
 		fy   = 0.0;
 		for (j=0; j<npart; j++) {
-			rx = xi - others[j].x;
-			ry = yi - others[j].y;
-			mj = others[j].mass;
+			rx = xi - particles[j].x;
+			ry = yi - particles[j].y;
+			mj = particles[j].mass;
 			r  = rx * rx + ry * ry;
 			/* ignore overlap and same particle */
 			if (r == 0.0) continue;
@@ -199,7 +213,7 @@ double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[],
 	return max_f;
 }
 
-double ComputeNewPos( Particle particles[], ParticleV pv[], int npart, double max_f)
+double ComputeNewPos()
 {
 	int i;
 	double a0, a1, a2;
