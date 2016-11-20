@@ -121,22 +121,23 @@ int main(int argc, char **argv)
 }
 
 void ComputeForces_MPI(ParticleV pv[]) {
-	MPI_Bcast(&particles, sizeof(Particle)*npart, MPI_CHAR, 0, MPI_COMM_WORLD);
+	MPI_Bcast(&particles, npart, MPI_CHAR, 0, MPI_COMM_WORLD);
+	int final_range = npart - (part_portion * (num_process - 2));
 	if (process_rank == 0) {
 		int i;
 		for (i = 1; i != num_process; ++i) {
 			if (process_rank == num_process - 1) {
-				MPI_Recv(&pv[i], sizeof(ParticleV)*npart, MPI_CHAR, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+				MPI_Recv(&pv[(i-1)*part_portion], final_range, MPI_CHAR, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			} else {
-				MPI_Recv(&pv[i], sizeof(ParticleV)*part_portion, MPI_CHAR, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+				MPI_Recv(&pv[(i-1)*part_portion], part_portion, MPI_CHAR, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			}
 		}
 	} else {
 		ComputeForces(particles, particles, pv, npart);
 		if (process_rank == num_process - 1) {
-			MPI_Send(&pv[process_rank], sizeof(ParticleV)*npart, MPI_CHAR, 0, 0, MPI_COMM_WORLD);
+			MPI_Send(&pv[(process_rank-1)*part_portion], final_range, MPI_CHAR, 0, 0, MPI_COMM_WORLD);
 		} else {
-			MPI_Send(&pv[process_rank], sizeof(ParticleV)*part_portion, MPI_CHAR, 0, 0, MPI_COMM_WORLD);
+			MPI_Send(&pv[(process_rank-1)*part_portion], part_portion, MPI_CHAR, 0, 0, MPI_COMM_WORLD);
 		}
 	}
 }
